@@ -1,0 +1,874 @@
+"""
+MASI Index GARCH Analysis, Backtesting, and VaR Calculation
+This script performs:
+1. Data simulation for MASI index (2020-2025)
+2. Returns calculation
+3. GARCH(1,1) model fitting from scratch
+4. Rolling window backtesting
+5. Forecast comparison with actual values
+6. Value at Risk (VaR) calculation
+
+Note: This is a standalone implementation of GARCH without external dependencies
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import stats
+from scipy.optimize import minimize
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set style
+try:
+    plt.style.use('seaborn-v0_8-darkgrid')
+except:
+    plt.style.use('default')
+
+
+class GARCH11:
+    """
+    GARCH(1,1) model implementation from scratch
+    σ²_t = ω + α*ε²_{t-1} + β*σ²_{t-1}
+    """
+    
+    def __init__(self, returns):
+        self.returns = np.array(returns)
+        self.n = len(self.returns)
+        self.params = None
+        self.conditional_volatility = None
+        self.std_resid = None
+        self.loglikelihood = None
+        self.aic = None
+        self.bic = None
+        
+    def _garch_likelihood(self, params):
+        """Calculate negative log-likelihood for GARCH(1,1)"""
+        omega, alpha, beta = params
+        
+        # Constraints check
+        if omega <= 0 or alpha < 0 or beta < 0 or (alpha + beta) >= 1:
+            return 1e10
+        
+        # Initialize variance with sample variance
+        sigma2 = np.zeros(self.n)
+        sigma2[0] = np.var(self.returns)
+        
+        # Calculate conditional variance
+        for t in range(1, self.n):
+            sigma2[t] = omega + alpha * self.returns[t-1]**2 + beta * sigma2[t-1]
+            
+            # Ensure positive variance
+            if sigma2[t] <= 0:
+                return 1e10
+        
+        # Calculate log-likelihood
+        loglik = -0.5 * np.sum(np.log(2 * np.pi * sigma2) + self.returns**2 / sigma2)
+        
+        return -loglik  # Return negative for minimization
+    
+    def fit(self):
+        """Fit GARCH(1,1) model using maximum likelihood estimation"""
+        # Initial parameter values
+        initial_params = [0.01, 0.1, 0.85]
+        
+        # Bounds for parameters
+        bounds = [(1e-6, 1), (0, 1), (0, 1)]
+        
+        # Constraints: alpha + beta < 1
+        constraints = {'type': 'ineq', 'fun': lambda x: 0.9999 - (x[1] + x[2])}
+        
+        # Optimize
+        result = minimize(
+            self._garch_likelihood,
+            initial_params,
+            method='SLSQP',
+            bounds=bounds,
+            constraints=constraints,
+            options={'maxiter': 1000}
+        )
+        
+        if not result.success:
+            print(f"Warning: Optimization did not converge: {result.message}")
+        
+        self.params = result.x
+        omega, alpha, beta = self.params
+        
+        # Calculate fitted conditional volatility
+        sigma2 = np.zeros(self.n)
+        sigma2[0] = np.var(self.returns)
+        
+        for t in range(1, self.n):
+            sigma2[t] = omega + alpha * self.returns[t-1]**2 + beta * sigma2[t-1]
+        
+        self.conditional_volatility = np.sqrt(sigma2)
+        self.std_resid = self.returns / self.conditional_volatility
+        
+        # Calculate information criteria
+        self.loglikelihood = -result.fun
+        k = 3  # number of parameters
+        self.aic = 2 * k - 2 * self.loglikelihood
+        self.bic = k * np.log(self.n) - 2 * self.loglikelihood
+        
+        return self
+    
+    def forecast(self, horizon=1):
+        """Forecast volatility h-steps ahead"""
+        omega, alpha, beta = self.params
+        
+        # Last conditional variance
+        last_variance = self.conditional_volatility[-1]**2
+        last_return = self.returns[-1]
+        
+        forecasts = np.zeros(horizon)
+        
+        # Multi-step forecast
+        current_variance = omega + alpha * last_return**2 + beta * last_variance
+        forecasts[0] = current_variance
+        
+        for h in range(1, horizon):
+            current_variance = omega + (alpha + beta) * current_variance
+            forecasts[h] = current_variance
+        
+        return np.sqrt(forecasts)
+    
+    def summary(self):
+        """Return model summary as string"""
+        omega, alpha, beta = self.params
+        persistence = alpha + beta
+        unconditional_vol = np.sqrt(omega / (1 - persistence))
+        
+        summary = f"""
+{'='*70}
+                    GARCH(1,1) Model Results
+{'='*70}
+
+Parameters:
+  ω (omega):        {omega:.6f}
+  α (alpha):        {alpha:.6f}
+  β (beta):         {beta:.6f}
+
+Statistics:
+  α + β:            {persistence:.6f}  (Persistence)
+  Unconditional σ:  {unconditional_vol:.6f}
+  
+Model Fit:
+  Log-Likelihood:   {self.loglikelihood:.2f}
+  AIC:              {self.aic:.2f}
+  BIC:              {self.bic:.2f}
+
+Interpretation:
+  - High persistence (α+β ≈ {persistence:.3f}) indicates volatility clustering
+  - α measures shock impact, β measures volatility persistence
+  - Unconditional volatility: {unconditional_vol:.4f}%
+
+{'='*70}
+"""
+        return summary
+
+class MASIGARCHAnalysis:
+    """Class to perform GARCH analysis on MASI index"""
+    
+    def __init__(self, start_date='2020-01-01', end_date='2025-12-31'):
+        self.start_date = start_date
+        self.end_date = end_date
+        self.data = None
+        self.returns = None
+        self.best_model = None
+        self.best_model_name = "GARCH(1,1)"
+        self.forecasts = None
+        self.var_results = None
+        
+    def generate_masi_data(self):
+        """Generate realistic MASI-like index data"""
+        print("Generating MASI index data...")
+        np.random.seed(42)
+        
+        date_range = pd.date_range(start=self.start_date, end=self.end_date, freq='D')
+        n = len(date_range)
+        
+        # Simulate realistic MASI index with GARCH characteristics
+        # MASI typically shows volatility clustering
+        
+        # Generate returns with GARCH structure
+        omega, alpha, beta = 0.00001, 0.1, 0.85  # True GARCH parameters
+        
+        returns = np.zeros(n)
+        sigma2 = np.zeros(n)
+        sigma2[0] = 0.0002  # Initial variance
+        
+        for t in range(n):
+            # GARCH variance
+            if t > 0:
+                sigma2[t] = omega + alpha * returns[t-1]**2 + beta * sigma2[t-1]
+            
+            # Return with conditional volatility
+            returns[t] = np.random.normal(0.0005, np.sqrt(sigma2[t]))
+            
+            # Add occasional jumps for realism
+            if np.random.random() < 0.02:  # 2% chance of jump
+                returns[t] += np.random.choice([-1, 1]) * np.random.uniform(0.02, 0.04)
+        
+        # Convert to price levels
+        prices = 100 * np.exp(np.cumsum(returns))
+        
+        # Create realistic OHLCV data
+        self.data = pd.DataFrame({
+            'Open': prices * np.random.uniform(0.995, 1.000, n),
+            'High': prices * np.random.uniform(1.000, 1.015, n),
+            'Low': prices * np.random.uniform(0.985, 1.000, n),
+            'Close': prices,
+            'Adj Close': prices,
+            'Volume': np.random.lognormal(14, 0.5, n).astype(int)
+        }, index=date_range)
+        
+        # Ensure High >= Close >= Low and Open
+        self.data['High'] = self.data[['Open', 'High', 'Close']].max(axis=1)
+        self.data['Low'] = self.data[['Open', 'Low', 'Close']].min(axis=1)
+        
+        print(f"Generated {len(self.data)} data points")
+        print(f"Date range: {self.data.index[0].date()} to {self.data.index[-1].date()}")
+        print(f"Price range: {self.data['Close'].min():.2f} to {self.data['Close'].max():.2f}")
+        
+        return self.data
+    
+    def calculate_returns(self):
+        """Calculate log returns"""
+        print("\nCalculating returns...")
+        self.returns = 100 * np.log(self.data['Close'] / self.data['Close'].shift(1))
+        self.returns = self.returns.dropna()
+        
+        print(f"Returns statistics:")
+        print(f"  Mean: {self.returns.mean():.6f}%")
+        print(f"  Std Dev: {self.returns.std():.4f}%")
+        print(f"  Min: {self.returns.min():.4f}%")
+        print(f"  Max: {self.returns.max():.4f}%")
+        print(f"  Skewness: {self.returns.skew():.4f}")
+        print(f"  Kurtosis: {self.returns.kurtosis():.4f}")
+        
+        return self.returns
+    
+    def test_arch_effect(self):
+        """Test for ARCH effects using Ljung-Box test on squared returns"""
+        print("\n" + "="*60)
+        print("Testing for ARCH Effects")
+        print("="*60)
+        
+        # Manual Ljung-Box test on squared returns
+        squared_returns = (self.returns ** 2).values
+        n = len(squared_returns)
+        
+        # Calculate autocorrelations
+        mean_sq = np.mean(squared_returns)
+        sq_centered = squared_returns - mean_sq
+        
+        lags = 10
+        autocorrs = []
+        
+        for lag in range(1, lags + 1):
+            r = np.corrcoef(squared_returns[:-lag], squared_returns[lag:])[0, 1]
+            autocorrs.append(r)
+        
+        # Ljung-Box statistic
+        lb_stat = n * (n + 2) * np.sum([(autocorrs[i]**2) / (n - i - 1) 
+                                         for i in range(lags)])
+        
+        # Chi-square test
+        p_value = 1 - stats.chi2.cdf(lb_stat, lags)
+        
+        print(f"\nLjung-Box Test on Squared Returns (lag={lags}):")
+        print(f"  Test Statistic: {lb_stat:.4f}")
+        print(f"  P-value: {p_value:.6f}")
+        
+        if p_value < 0.05:
+            print("\n✓ ARCH effects detected (p-value < 0.05)")
+            print("  GARCH modeling is appropriate")
+        else:
+            print("\n✗ No significant ARCH effects detected")
+            print("  But GARCH modeling may still capture volatility dynamics")
+        
+        # Show first 5 autocorrelations
+        print(f"\nAutocorrelations of squared returns:")
+        for i, ac in enumerate(autocorrs[:5], 1):
+            print(f"  Lag {i}: {ac:.4f}")
+    
+    def fit_garch_models(self):
+        """Fit GARCH(1,1) model"""
+        print("\n" + "="*60)
+        print("Fitting GARCH(1,1) Model")
+        print("="*60)
+        
+        print("\nEstimating parameters via maximum likelihood...")
+        
+        # Fit GARCH(1,1) model
+        self.best_model = GARCH11(self.returns.values)
+        self.best_model.fit()
+        
+        print("\n" + "="*60)
+        print("GARCH Model Summary")
+        print("="*60)
+        print(self.best_model.summary())
+        
+        return self.best_model
+    
+    def rolling_window_backtest(self, train_size=0.7, window_size=252):
+        """
+        Perform rolling window backtesting
+        
+        Parameters:
+        - train_size: proportion of data for initial training
+        - window_size: size of rolling window in days (252 = 1 year)
+        """
+        print("\n" + "="*60)
+        print("Rolling Window Backtesting")
+        print("="*60)
+        
+        # Split data
+        returns_array = self.returns.values
+        n = len(returns_array)
+        split_point = int(n * train_size)
+        
+        print(f"\nTotal observations: {n}")
+        print(f"Training period: {split_point} observations")
+        print(f"  From: {self.returns.index[0].date()}")
+        print(f"  To: {self.returns.index[split_point-1].date()}")
+        print(f"Testing period: {n - split_point} observations")
+        print(f"  From: {self.returns.index[split_point].date()}")
+        print(f"  To: {self.returns.index[-1].date()}")
+        print(f"Window size: {window_size} days")
+        
+        forecasts = []
+        realized_vol = []
+        dates = []
+        
+        # Rolling window forecast
+        print("\nPerforming rolling window forecasts...")
+        total_forecasts = n - split_point
+        
+        for i in range(split_point, n):
+            # Use rolling window
+            start_idx = max(0, i - window_size)
+            train_data = returns_array[start_idx:i]
+            
+            try:
+                # Fit GARCH model on rolling window
+                model = GARCH11(train_data)
+                model.fit()
+                
+                # Forecast one step ahead
+                forecast_vol = model.forecast(horizon=1)[0]
+                forecasts.append(forecast_vol)
+                
+                # Realized volatility (absolute return as proxy)
+                realized_vol.append(abs(returns_array[i]))
+                dates.append(self.returns.index[i])
+                
+                if (i - split_point + 1) % 100 == 0:
+                    pct_complete = ((i - split_point + 1) / total_forecasts) * 100
+                    print(f"  Progress: {i - split_point + 1}/{total_forecasts} " +
+                          f"forecasts ({pct_complete:.1f}%)")
+                    
+            except Exception as e:
+                print(f"  Warning: Forecast failed at index {i}: {e}")
+                # Use last valid forecast or skip
+                if len(forecasts) > 0:
+                    forecasts.append(forecasts[-1])
+                    realized_vol.append(abs(returns_array[i]))
+                    dates.append(self.returns.index[i])
+                continue
+        
+        self.forecasts = pd.DataFrame({
+            'Date': dates,
+            'Forecast_Volatility': forecasts,
+            'Realized_Volatility': realized_vol
+        })
+        self.forecasts.set_index('Date', inplace=True)
+        
+        print(f"\n✓ Completed {len(forecasts)} forecasts")
+        
+        # Calculate forecast metrics
+        self._evaluate_forecasts()
+        
+        return self.forecasts
+    
+    def _evaluate_forecasts(self):
+        """Evaluate forecast accuracy"""
+        print("\n" + "="*60)
+        print("Forecast Evaluation Metrics")
+        print("="*60)
+        
+        y_true = self.forecasts['Realized_Volatility'].values
+        y_pred = self.forecasts['Forecast_Volatility'].values
+        
+        # Calculate metrics
+        mae = np.mean(np.abs(y_true - y_pred))
+        mse = np.mean((y_true - y_pred) ** 2)
+        rmse = np.sqrt(mse)
+        
+        # Avoid division by zero in MAPE
+        mask = y_true != 0
+        mape = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100 if mask.any() else np.nan
+        
+        # Correlation
+        correlation = np.corrcoef(y_true, y_pred)[0, 1]
+        
+        print(f"\nMean Absolute Error (MAE): {mae:.4f}")
+        print(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
+        if not np.isnan(mape):
+            print(f"Mean Absolute Percentage Error (MAPE): {mape:.2f}%")
+        print(f"Correlation: {correlation:.4f}")
+        
+        # Directional accuracy
+        y_true_mean = np.mean(y_true)
+        y_pred_mean = np.mean(y_pred)
+        y_true_binary = (y_true > y_true_mean).astype(int)
+        y_pred_binary = (y_pred > y_pred_mean).astype(int)
+        directional_accuracy = np.mean(y_true_binary == y_pred_binary) * 100
+        
+        print(f"Directional Accuracy: {directional_accuracy:.2f}%")
+        
+        # R-squared
+        ss_res = np.sum((y_true - y_pred) ** 2)
+        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+        print(f"R-squared: {r2:.4f}")
+    
+    def calculate_var(self, confidence_levels=[0.95, 0.99], horizon=1):
+        """
+        Calculate Value at Risk (VaR) using GARCH forecasts
+        
+        Parameters:
+        - confidence_levels: list of confidence levels
+        - horizon: forecast horizon in days
+        """
+        print("\n" + "="*60)
+        print("Value at Risk (VaR) Calculation")
+        print("="*60)
+        
+        # Get final forecast from the fitted model
+        forecast_volatility = self.best_model.forecast(horizon=horizon)
+        forecast_variance = forecast_volatility ** 2
+        
+        # Current portfolio value (assuming $1M for demonstration)
+        portfolio_value = 1_000_000
+        
+        # Mean return (can be set to 0 for conservative estimate)
+        mean_return = self.returns.mean() / 100  # Convert to decimal
+        
+        # Calculate VaR for different confidence levels
+        var_results = []
+        
+        print(f"\nPortfolio Value: ${portfolio_value:,.2f}")
+        print(f"Forecast Horizon: {horizon} day(s)")
+        print(f"Mean Daily Return: {mean_return*100:.4f}%")
+        
+        for h in range(horizon):
+            print(f"\n  Forecast volatility (day {h+1}): {forecast_volatility[h]:.4f}%")
+        
+        print("\n" + "-"*80)
+        
+        for conf_level in confidence_levels:
+            alpha = 1 - conf_level
+            
+            # Using normal distribution (assuming standardized returns)
+            z_score = stats.norm.ppf(alpha)
+            
+            # VaR formula: VaR = -(μ + σ * z_α)
+            # For multi-day horizon, scale by sqrt(horizon)
+            horizon_volatility = forecast_volatility[-1] / 100  # Last forecast, convert to decimal
+            
+            # Portfolio return = mean_return * horizon + volatility * sqrt(horizon) * z_score
+            portfolio_return = mean_return * horizon + horizon_volatility * np.sqrt(horizon) * z_score
+            var_pct = -portfolio_return  # VaR is negative of return
+            var_amount = portfolio_value * var_pct
+            
+            var_results.append({
+                'Confidence_Level': f"{conf_level*100}%",
+                'Alpha': f"{alpha:.4f}",
+                'Z_Score': f"{z_score:.4f}",
+                'VaR_Percentage': f"{var_pct*100:.2f}%",
+                'VaR_Amount': f"${abs(var_amount):,.2f}",
+                'Interpretation': f"Loss won't exceed this with {conf_level*100}% confidence"
+            })
+        
+        self.var_results = pd.DataFrame(var_results)
+        
+        print(self.var_results.to_string(index=False))
+        print("-"*80)
+        
+        # Conditional VaR (Expected Shortfall / CVaR)
+        print("\n" + "="*60)
+        print("Conditional VaR (Expected Shortfall / CVaR)")
+        print("="*60)
+        print("\nCVaR represents the expected loss given that VaR has been exceeded")
+        
+        for conf_level in confidence_levels:
+            alpha = 1 - conf_level
+            z_score = stats.norm.ppf(alpha)
+            
+            # CVaR formula for normal distribution: CVaR = μ - σ * φ(z_α) / α
+            # where φ is the PDF of standard normal
+            horizon_volatility = forecast_volatility[-1] / 100
+            
+            phi_z = stats.norm.pdf(z_score)
+            cvar_return = mean_return * horizon - horizon_volatility * np.sqrt(horizon) * (phi_z / alpha)
+            cvar_pct = -cvar_return
+            cvar_amount = portfolio_value * cvar_pct
+            
+            print(f"\n{conf_level*100}% CVaR:")
+            print(f"  Percentage: {cvar_pct*100:.2f}%")
+            print(f"  Amount: ${abs(cvar_amount):,.2f}")
+            print(f"  Interpretation: Expected loss if loss exceeds {conf_level*100}% VaR")
+        
+        # Additional risk metrics
+        print("\n" + "="*60)
+        print("Additional Risk Metrics")
+        print("="*60)
+        
+        # Maximum drawdown estimate
+        max_1day_loss = portfolio_value * (mean_return - 3 * forecast_volatility[-1]/100)
+        print(f"\nEstimated Maximum 1-day Loss (3σ event): ${abs(max_1day_loss):,.2f}")
+        
+        # Annual VaR (scaling to 252 trading days)
+        annual_vol = forecast_volatility[-1] * np.sqrt(252) / 100
+        annual_var_95 = portfolio_value * (mean_return * 252 - stats.norm.ppf(0.05) * annual_vol)
+        print(f"Estimated Annual VaR (95%): ${abs(annual_var_95):,.2f}")
+        
+        return self.var_results
+    
+    def plot_results(self):
+        """Create comprehensive visualization of results"""
+        print("\n" + "="*60)
+        print("Generating Visualizations")
+        print("="*60)
+        
+        fig = plt.figure(figsize=(16, 12))
+        
+        # 1. Price and Returns
+        ax1 = plt.subplot(3, 2, 1)
+        self.data['Close'].plot(ax=ax1, linewidth=2, color='blue')
+        ax1.set_title('MASI Index Price', fontsize=14, fontweight='bold')
+        ax1.set_xlabel('Date')
+        ax1.set_ylabel('Price')
+        ax1.grid(True, alpha=0.3)
+        
+        ax2 = plt.subplot(3, 2, 2)
+        self.returns.plot(ax=ax2, linewidth=0.8, alpha=0.7, color='darkgreen')
+        ax2.set_title('MASI Index Returns', fontsize=14, fontweight='bold')
+        ax2.set_xlabel('Date')
+        ax2.set_ylabel('Returns (%)')
+        ax2.axhline(y=0, color='r', linestyle='--', alpha=0.5)
+        ax2.grid(True, alpha=0.3)
+        
+        # 2. Returns Distribution
+        ax3 = plt.subplot(3, 2, 3)
+        n, bins, patches = ax3.hist(self.returns, bins=50, density=True, 
+                                      alpha=0.7, edgecolor='black', color='skyblue')
+        
+        # Overlay normal distribution
+        mu, sigma = self.returns.mean(), self.returns.std()
+        x = np.linspace(self.returns.min(), self.returns.max(), 100)
+        ax3.plot(x, stats.norm.pdf(x, mu, sigma), 'r-', linewidth=2, label='Normal Distribution')
+        ax3.set_title('Returns Distribution', fontsize=14, fontweight='bold')
+        ax3.set_xlabel('Returns (%)')
+        ax3.set_ylabel('Density')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # 3. Conditional Volatility
+        ax4 = plt.subplot(3, 2, 4)
+        conditional_vol_series = pd.Series(self.best_model.conditional_volatility, 
+                                          index=self.returns.index)
+        conditional_vol_series.plot(ax=ax4, linewidth=1.5, color='purple')
+        ax4.set_title(f'Conditional Volatility ({self.best_model_name})', 
+                     fontsize=14, fontweight='bold')
+        ax4.set_xlabel('Date')
+        ax4.set_ylabel('Volatility (%)')
+        ax4.grid(True, alpha=0.3)
+        
+        # 4. Forecast vs Realized Volatility
+        ax5 = plt.subplot(3, 2, 5)
+        self.forecasts['Realized_Volatility'].plot(ax=ax5, label='Realized', 
+                                                    linewidth=1.5, alpha=0.7, color='orange')
+        self.forecasts['Forecast_Volatility'].plot(ax=ax5, label='Forecast', 
+                                                    linewidth=1.5, alpha=0.7, color='blue')
+        ax5.set_title('Rolling Window Forecasts vs Realized Volatility', 
+                     fontsize=14, fontweight='bold')
+        ax5.set_xlabel('Date')
+        ax5.set_ylabel('Volatility (%)')
+        ax5.legend()
+        ax5.grid(True, alpha=0.3)
+        
+        # 5. Scatter plot of Forecast vs Realized
+        ax6 = plt.subplot(3, 2, 6)
+        ax6.scatter(self.forecasts['Forecast_Volatility'], 
+                   self.forecasts['Realized_Volatility'], 
+                   alpha=0.5, s=20, color='green')
+        
+        # Add diagonal line (perfect forecast)
+        max_val = max(self.forecasts['Forecast_Volatility'].max(), 
+                     self.forecasts['Realized_Volatility'].max())
+        min_val = min(self.forecasts['Forecast_Volatility'].min(), 
+                     self.forecasts['Realized_Volatility'].min())
+        ax6.plot([min_val, max_val], [min_val, max_val], 'r--', 
+                linewidth=2, label='Perfect Forecast')
+        
+        # Add regression line
+        z = np.polyfit(self.forecasts['Forecast_Volatility'], 
+                      self.forecasts['Realized_Volatility'], 1)
+        p = np.poly1d(z)
+        ax6.plot(self.forecasts['Forecast_Volatility'].sort_values(), 
+                p(self.forecasts['Forecast_Volatility'].sort_values()), 
+                "b-", linewidth=1.5, alpha=0.8, label='Fitted Line')
+        
+        ax6.set_title('Forecast vs Realized Volatility', fontsize=14, fontweight='bold')
+        ax6.set_xlabel('Forecast Volatility (%)')
+        ax6.set_ylabel('Realized Volatility (%)')
+        ax6.legend()
+        ax6.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig('/mnt/user-data/outputs/masi_garch_analysis.png', dpi=300, bbox_inches='tight')
+        print("\n✓ Main plots saved to: masi_garch_analysis.png")
+        
+        # Additional plot: Standardized Residuals Diagnostics
+        fig2, axes = plt.subplots(2, 2, figsize=(14, 10))
+        
+        std_resid = self.best_model.std_resid
+        
+        # Standardized residuals time series
+        axes[0, 0].plot(self.returns.index, std_resid, linewidth=0.8, color='darkblue')
+        axes[0, 0].axhline(y=0, color='r', linestyle='--', alpha=0.5)
+        axes[0, 0].axhline(y=2, color='orange', linestyle=':', alpha=0.5, label='±2σ')
+        axes[0, 0].axhline(y=-2, color='orange', linestyle=':', alpha=0.5)
+        axes[0, 0].set_title('Standardized Residuals', fontsize=12, fontweight='bold')
+        axes[0, 0].set_xlabel('Date')
+        axes[0, 0].set_ylabel('Standardized Residuals')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # Q-Q plot
+        stats.probplot(std_resid, dist="norm", plot=axes[0, 1])
+        axes[0, 1].set_title('Q-Q Plot (Normal)', fontsize=12, fontweight='bold')
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # Histogram of standardized residuals
+        axes[1, 0].hist(std_resid, bins=50, density=True, alpha=0.7, 
+                       edgecolor='black', color='lightblue')
+        x_resid = np.linspace(std_resid.min(), std_resid.max(), 100)
+        axes[1, 0].plot(x_resid, stats.norm.pdf(x_resid, 0, 1), 'r-', 
+                       linewidth=2, label='Standard Normal')
+        axes[1, 0].set_title('Distribution of Standardized Residuals', 
+                            fontsize=12, fontweight='bold')
+        axes[1, 0].set_xlabel('Standardized Residuals')
+        axes[1, 0].set_ylabel('Density')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # ACF of squared residuals (manual calculation)
+        squared_resid = std_resid ** 2
+        lags = 30
+        acf_values = []
+        
+        for lag in range(lags + 1):
+            if lag == 0:
+                acf_values.append(1.0)
+            else:
+                corr = np.corrcoef(squared_resid[:-lag], squared_resid[lag:])[0, 1]
+                acf_values.append(corr)
+        
+        axes[1, 1].bar(range(len(acf_values)), acf_values, width=0.3, color='steelblue')
+        
+        # Add confidence interval
+        conf_int = 1.96 / np.sqrt(len(squared_resid))
+        axes[1, 1].axhline(y=conf_int, color='r', linestyle='--', linewidth=1, alpha=0.7)
+        axes[1, 1].axhline(y=-conf_int, color='r', linestyle='--', linewidth=1, alpha=0.7)
+        axes[1, 1].axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+        
+        axes[1, 1].set_title('ACF of Squared Standardized Residuals', 
+                            fontsize=12, fontweight='bold')
+        axes[1, 1].set_xlabel('Lag')
+        axes[1, 1].set_ylabel('Autocorrelation')
+        axes[1, 1].grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        plt.savefig('/mnt/user-data/outputs/masi_residuals_diagnostics.png', dpi=300, bbox_inches='tight')
+        print("✓ Diagnostic plots saved to: masi_residuals_diagnostics.png")
+        
+        plt.close('all')
+    
+    def save_results(self):
+        """Save all results to CSV files"""
+        print("\n" + "="*60)
+        print("Saving Results")
+        print("="*60)
+        
+        # Save data
+        self.data.to_csv('/mnt/user-data/outputs/masi_price_data.csv')
+        print("✓ Price data saved to: masi_price_data.csv")
+        
+        # Save returns
+        self.returns.to_csv('/mnt/user-data/outputs/masi_returns.csv', header=['Returns'])
+        print("✓ Returns saved to: masi_returns.csv")
+        
+        # Save forecasts
+        self.forecasts.to_csv('/mnt/user-data/outputs/masi_forecasts.csv')
+        print("✓ Forecasts saved to: masi_forecasts.csv")
+        
+        # Save VaR results
+        if self.var_results is not None:
+            self.var_results.to_csv('/mnt/user-data/outputs/masi_var_results.csv', index=False)
+            print("✓ VaR results saved to: masi_var_results.csv")
+        
+        # Save model summary
+        with open('/mnt/user-data/outputs/masi_model_summary.txt', 'w') as f:
+            f.write("="*80 + "\n")
+            f.write(f"MASI Index GARCH Analysis - Model: {self.best_model_name}\n")
+            f.write("="*80 + "\n\n")
+            f.write(self.best_model.summary())
+            f.write("\n\n")
+            f.write("="*80 + "\n")
+            f.write("Data Summary\n")
+            f.write("="*80 + "\n")
+            f.write(f"Total Observations: {len(self.returns)}\n")
+            f.write(f"Mean Return: {self.returns.mean():.6f}%\n")
+            f.write(f"Return Volatility: {self.returns.std():.4f}%\n")
+            f.write(f"Minimum Return: {self.returns.min():.4f}%\n")
+            f.write(f"Maximum Return: {self.returns.max():.4f}%\n")
+            f.write(f"Skewness: {self.returns.skew():.4f}\n")
+            f.write(f"Kurtosis: {self.returns.kurtosis():.4f}\n")
+        print("✓ Model summary saved to: masi_model_summary.txt")
+        
+        print(f"\n📁 All files saved to: /mnt/user-data/outputs/")
+    
+    def run_full_analysis(self):
+        """Run complete analysis pipeline"""
+        print("\n" + "="*80)
+        print(" "*25 + "MASI INDEX GARCH ANALYSIS")
+        print(" "*20 + "Complete Financial Risk Analysis")
+        print("="*80)
+        
+        # Step 1: Generate/Fetch data
+        print("\n[Step 1/8] Data Collection")
+        self.generate_masi_data()
+        
+        # Step 2: Calculate returns
+        print("\n[Step 2/8] Returns Calculation")
+        self.calculate_returns()
+        
+        # Step 3: Test for ARCH effects
+        print("\n[Step 3/8] ARCH Effects Testing")
+        self.test_arch_effect()
+        
+        # Step 4: Fit GARCH models
+        print("\n[Step 4/8] GARCH Model Estimation")
+        self.fit_garch_models()
+        
+        # Step 5: Rolling window backtest
+        print("\n[Step 5/8] Rolling Window Backtesting")
+        self.rolling_window_backtest(train_size=0.7, window_size=252)
+        
+        # Step 6: Calculate VaR
+        print("\n[Step 6/8] Value at Risk Calculation")
+        self.calculate_var(confidence_levels=[0.90, 0.95, 0.99], horizon=1)
+        
+        # Step 7: Plot results
+        print("\n[Step 7/8] Visualization Generation")
+        self.plot_results()
+        
+        # Step 8: Save results
+        print("\n[Step 8/8] Saving Results")
+        self.save_results()
+        
+        print("\n" + "="*80)
+        print(" "*30 + "ANALYSIS COMPLETE!")
+        print("="*80)
+
+
+def main():
+    """Main execution function"""
+    # Initialize analysis
+    analysis = MASIGARCHAnalysis(start_date='2020-01-01', end_date='2025-02-15')
+    
+    # Run full analysis
+    analysis.run_full_analysis()
+    
+    print("\n" + "="*80)
+    print("                          SUMMARY OF KEY FINDINGS")
+    print("="*80)
+    
+    omega, alpha, beta = analysis.best_model.params
+    persistence = alpha + beta
+    
+    print(f"\n📊 DATA SUMMARY:")
+    print(f"  • Total observations: {len(analysis.returns)}")
+    print(f"  • Date range: {analysis.data.index[0].date()} to {analysis.data.index[-1].date()}")
+    print(f"  • Starting price: ${analysis.data['Close'].iloc[0]:.2f}")
+    print(f"  • Ending price: ${analysis.data['Close'].iloc[-1]:.2f}")
+    print(f"  • Total return: {((analysis.data['Close'].iloc[-1] / analysis.data['Close'].iloc[0]) - 1) * 100:.2f}%")
+    
+    print(f"\n📈 RETURNS CHARACTERISTICS:")
+    print(f"  • Mean daily return: {analysis.returns.mean():.4f}%")
+    print(f"  • Daily volatility: {analysis.returns.std():.4f}%")
+    print(f"  • Annualized volatility: {analysis.returns.std() * np.sqrt(252):.2f}%")
+    print(f"  • Skewness: {analysis.returns.skew():.4f}")
+    print(f"  • Excess kurtosis: {analysis.returns.kurtosis():.4f}")
+    
+    print(f"\n🔧 GARCH MODEL PARAMETERS:")
+    print(f"  • Model: {analysis.best_model_name}")
+    print(f"  • ω (omega): {omega:.6f}")
+    print(f"  • α (alpha): {alpha:.6f} - measures shock impact")
+    print(f"  • β (beta): {beta:.6f} - measures persistence")
+    print(f"  • Persistence (α+β): {persistence:.6f}")
+    print(f"  • Log-Likelihood: {analysis.best_model.loglikelihood:.2f}")
+    print(f"  • AIC: {analysis.best_model.aic:.2f}")
+    print(f"  • BIC: {analysis.best_model.bic:.2f}")
+    
+    print(f"\n🎯 BACKTEST RESULTS:")
+    print(f"  • Number of forecasts: {len(analysis.forecasts)}")
+    
+    y_true = analysis.forecasts['Realized_Volatility'].values
+    y_pred = analysis.forecasts['Forecast_Volatility'].values
+    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+    corr = np.corrcoef(y_true, y_pred)[0, 1]
+    
+    print(f"  • RMSE: {rmse:.4f}")
+    print(f"  • Correlation: {corr:.4f}")
+    
+    print(f"\n💰 VALUE AT RISK (95% confidence):")
+    var_95 = analysis.var_results[analysis.var_results['Confidence_Level'] == '95.0%']
+    if not var_95.empty:
+        print(f"  • VaR (1-day): {var_95['VaR_Amount'].values[0]}")
+        print(f"  • VaR percentage: {var_95['VaR_Percentage'].values[0]}")
+    
+    print(f"\n📁 OUTPUT FILES:")
+    print(f"  • masi_price_data.csv - Price and volume data")
+    print(f"  • masi_returns.csv - Calculated returns")
+    print(f"  • masi_forecasts.csv - Rolling window forecasts")
+    print(f"  • masi_var_results.csv - VaR calculations")
+    print(f"  • masi_model_summary.txt - Detailed model statistics")
+    print(f"  • masi_garch_analysis.png - Main visualizations")
+    print(f"  • masi_residuals_diagnostics.png - Diagnostic plots")
+    
+    print(f"\n💡 KEY INSIGHTS:")
+    if persistence > 0.95:
+        print(f"  • High persistence ({persistence:.3f}) indicates strong volatility clustering")
+    else:
+        print(f"  • Moderate persistence ({persistence:.3f}) suggests some volatility clustering")
+    
+    if analysis.returns.kurtosis() > 3:
+        print(f"  • Excess kurtosis ({analysis.returns.kurtosis():.2f}) indicates fat tails")
+    
+    if corr > 0.5:
+        print(f"  • Good forecast accuracy (correlation: {corr:.3f})")
+    else:
+        print(f"  • Moderate forecast accuracy (correlation: {corr:.3f})")
+    
+    print("\n" + "="*80)
+    print("\n✅ All results saved successfully!")
+    print("📊 Check the visualizations for detailed insights!")
+    print("="*80)
+
+
+if __name__ == "__main__":
+    main()
